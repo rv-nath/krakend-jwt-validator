@@ -26,7 +26,7 @@ func TestJWTValidatorMiddleware(t *testing.T) {
 	}
 
 	handler := func(_ context.Context, _ map[string]interface{}, next http.Handler) (http.Handler, error) {
-		return jwtValidator.Middleware(next), nil
+		return jwtValidator.Middleware(next, []string{"/signup", "/welcome"}), nil
 	}
 
 	t.Run("Valid Token", func(t *testing.T) {
@@ -83,6 +83,44 @@ func TestJWTValidatorMiddleware(t *testing.T) {
 
 		if rec.Code != http.StatusUnauthorized {
 			t.Errorf("expected status %d, got %d", http.StatusUnauthorized, rec.Code)
+		}
+	})
+
+	t.Run("Skip List - Signup Endpoint", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/signup", nil)
+		rec := httptest.NewRecorder()
+
+		h, err := handler(context.Background(), nil, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+			fmt.Fprintln(w, "Signup route - no JWT required!")
+		}))
+		if err != nil {
+			t.Fatalf("Failed to create handler: %v", err)
+		}
+
+		h.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusOK {
+			t.Errorf("expected status %d, got %d", http.StatusOK, rec.Code)
+		}
+	})
+
+	t.Run("Skip List - Welcome Endpoint", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/welcome", nil)
+		rec := httptest.NewRecorder()
+
+		h, err := handler(context.Background(), nil, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+			fmt.Fprintln(w, "Welcome route - no JWT required!")
+		}))
+		if err != nil {
+			t.Fatalf("Failed to create handler: %v", err)
+		}
+
+		h.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusOK {
+			t.Errorf("expected status %d, got %d", http.StatusOK, rec.Code)
 		}
 	})
 }

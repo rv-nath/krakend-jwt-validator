@@ -32,6 +32,14 @@ func (r registerer) registerHandlers(_ context.Context, extra map[string]interfa
 		return h, errors.New("configuration not found for jwt validator")
 	}
 
+	// Extract exceptions list from configuration
+	logger.Debug("Extracting exceptions from configuration...")
+	exceptions, _ := cfg["exceptions"].([]interface{})
+	exceptionURLs := make([]string, len(exceptions))
+	for i, url := range exceptions {
+		exceptionURLs[i] = url.(string)
+	}
+
 	// Get the secret from the configuration
 	secret, ok := cfg["secret"].(string)
 	if !ok {
@@ -40,7 +48,7 @@ func (r registerer) registerHandlers(_ context.Context, extra map[string]interfa
 
 	jwtValidator := &JWTValidator{Secret: secret}
 
-	return jwtValidator.Middleware(h), nil
+	return jwtValidator.Middleware(h, exceptionURLs), nil
 }
 
 // JWTValidator is a struct that holds the shared secret
@@ -80,8 +88,19 @@ func (j *JWTValidator) ValidateJWT(tokenString string) (jwt.MapClaims, error) {
 }
 
 // Middleware function that validates the JWT token and enriches the request with claims
-func (j *JWTValidator) Middleware(next http.Handler) http.Handler {
+func (j *JWTValidator) Middleware(next http.Handler, exceptionURLs []string) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Logging
+		logger.Debug(fmt.Sprintf("[PLUGIN: %s] Middleware executing..", HandlerRegisterer))
+
+		// Skip validation if the URL is in the exceptions list
+		for _, exception := range exceptionURLs {
+			if strings.HasPrefix(r.URL.Path, exception) {
+				next.ServeHTTP(w, r)
+				return
+			}
+		}
+
 		authHeader := r.Header.Get("Authorization")
 		if authHeader == "" {
 			http.Error(w, "missing Authorization header", http.StatusUnauthorized)
