@@ -39,15 +39,18 @@ func (r registerer) registerHandlers(_ context.Context, extra map[string]interfa
 	for i, url := range exceptions {
 		exceptionURLs[i] = url.(string)
 	}
+	logger.Debug("Configured exceptionURLs:", exceptionURLs)
 
 	// Get the secret from the configuration
 	secret, ok := cfg["secret"].(string)
 	if !ok {
+		logger.Error("missing jwt secret in configuration")
 		return h, errors.New("missing jwt secret in configuration")
 	}
 
 	jwtValidator := &JWTValidator{Secret: secret}
 
+	logger.Debug("JWT Validator middleware registered")
 	return jwtValidator.Middleware(h, exceptionURLs), nil
 }
 
