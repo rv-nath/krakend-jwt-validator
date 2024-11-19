@@ -91,7 +91,7 @@ func (j *JWTValidator) ValidateJWT(tokenString string) (jwt.MapClaims, error) {
 func (j *JWTValidator) Middleware(next http.Handler, exceptionURLs []string) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Logging
-		logger.Debug(fmt.Sprintf("[PLUGIN: %s] Middleware executing..", HandlerRegisterer))
+		logger.Info(fmt.Sprintf("[PLUGIN: %s] Middleware executing..", HandlerRegisterer))
 
 		// Skip validation if the URL is in the exceptions list
 		for _, exception := range exceptionURLs {
