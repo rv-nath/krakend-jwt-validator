@@ -32,14 +32,16 @@ func (r registerer) registerHandlers(_ context.Context, extra map[string]interfa
 		return h, errors.New("configuration not found for jwt validator")
 	}
 
-	// Extract exceptions list from configuration
-	logger.Debug("Extracting exceptions from configuration...")
-	exceptions, _ := cfg["exceptions"].([]interface{})
-	exceptionURLs := make([]string, len(exceptions))
-	for i, url := range exceptions {
-		exceptionURLs[i] = url.(string)
-	}
-	logger.Debug("Configured exceptionURLs:", exceptionURLs)
+	/*
+		// Extract exceptions list from configuration
+		logger.Debug("Extracting exceptions from configuration...")
+		exceptions, _ := cfg["exceptions"].([]interface{})
+		exceptionURLs := make([]string, len(exceptions))
+		for i, url := range exceptions {
+			exceptionURLs[i] = url.(string)
+		}
+		logger.Debug("Configured exceptionURLs:", exceptionURLs)
+	*/
 
 	// Get the secret from the configuration
 	secret, ok := cfg["secret"].(string)
@@ -91,19 +93,19 @@ func (j *JWTValidator) ValidateJWT(tokenString string) (jwt.MapClaims, error) {
 }
 
 // Middleware function that validates the JWT token and enriches the request with claims
-func (j *JWTValidator) Middleware(next http.Handler, exceptionURLs []string) http.Handler {
+func (j *JWTValidator) Middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Logging
 		logger.Info(fmt.Sprintf("[PLUGIN: %s] Middleware executing..", HandlerRegisterer))
 
-		// Skip validation if the URL is in the exceptions list
-		for _, exception := range exceptionURLs {
-			if strings.HasPrefix(r.URL.Path, exception) {
-				next.ServeHTTP(w, r)
-				return
-			}
+		// Check if the bypassValidation field is available in the context
+		if bypass, ok := r.Context().Value("bypassValidation").(bool); ok && bypass {
+			logger.Info("[PLUGIN: JWT Validator] Bypassing validation based on context flag")
+			next.ServeHTTP(w, r)
+			return
 		}
 
+		// Core logic of this plugin (validate jwt)
 		authHeader := r.Header.Get("Authorization")
 		if authHeader == "" {
 			http.Error(w, "missing Authorization header", http.StatusUnauthorized)
@@ -169,3 +171,13 @@ func (n noopLogger) Warning(_ ...interface{})  {}
 func (n noopLogger) Error(_ ...interface{})    {}
 func (n noopLogger) Critical(_ ...interface{}) {}
 func (n noopLogger) Fatal(_ ...interface{})    {}
+
+func isExceptionPath(path string) bool {
+	for _, pattern := range exceptionPatterns {
+		matched, _ := regexp.MatchString(pattern, path)
+		if matched {
+			return true
+		}
+	}
+	return false
+}
