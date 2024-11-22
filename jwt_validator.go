@@ -2,10 +2,12 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
 	"strings"
+	"sync"
 
 	"github.com/golang-jwt/jwt/v5"
 )
@@ -32,56 +34,86 @@ func (r registerer) registerHandlers(_ context.Context, extra map[string]interfa
 		return h, errors.New("configuration not found for jwt validator")
 	}
 
-	/*
-		// Extract exceptions list from configuration
-		logger.Debug("Extracting exceptions from configuration...")
-		exceptions, _ := cfg["exceptions"].([]interface{})
-		exceptionURLs := make([]string, len(exceptions))
-		for i, url := range exceptions {
-			exceptionURLs[i] = url.(string)
-		}
-		logger.Debug("Configured exceptionURLs:", exceptionURLs)
-	*/
-
 	// Get the secret from the configuration
-	secret, ok := cfg["secret"].(string)
+	secret, ok := cfg["sharedSecret"].(string)
 	if !ok {
-		logger.Error("missing jwt secret in configuration")
-		return h, errors.New("missing jwt secret in configuration")
+		logger.Info(fmt.Sprintf("[PLUGIN: %s] Missing secret in configuration. Will not handle RSA signed JWTs.", HandlerRegisterer))
+		// return h, errors.New("missing jwt secret in configuration")
+	}
+
+	jwksURL, ok := cfg["jwksURL"].(string)
+	if !ok {
+		logger.Info(fmt.Sprintf("[PLUGIN: %s] Missing jwksURL in configuration. Will not handle RSA signed JWTs.", HandlerRegisterer))
+		// return h, errors.New("missing `` in configuration")
+	}
+
+	// Check if at least one of the secret or jwksURL is provided
+	if secret == "" && jwksURL == "" {
+		logger.Error(fmt.Sprintf("[PLUGIN: %s] At least either `shared_secret` or `jwks_url` must be provided in krakend.json", HandlerRegisterer))
+		return h, errors.New("Either jwt secret or jwksURL is required")
 	}
 
 	jwtValidator := &JWTValidator{Secret: secret}
 
-	logger.Debug("JWT Validator middleware registered")
-	return jwtValidator.Middleware(h, exceptionURLs), nil
+	logger.Debug(fmt.Sprintf("[PLUGIN: %s] JWT validator middleware registered.", HandlerRegisterer))
+	return jwtValidator.Middleware(h), nil
 }
 
 // JWTValidator is a struct that holds the shared secret
 type JWTValidator struct {
-	Secret string
+	Secret  string
+	jwksURL string
+	jwks    *JWKS
+	sync.RWMutex
 }
 
-// ValidateJWT validates the incoming JWT token using the shared secret
+// JWKS is a struct that holds the JSON Web Key Set
+type JWKS struct {
+	Keys []JSONWebKey `json:"keys"`
+}
+
+// JSONWebKey represents a single key in the JWKS
+type JSONWebKey struct {
+	Kid string   `json:"kid"`
+	Kty string   `json:"kty"`
+	Alg string   `json:"alg"`
+	Use string   `json:"use"`
+	N   string   `json:"n"`
+	E   string   `json:"e"`
+	X5c []string `json:"x5c"`
+}
+
+// ValidateJWT validates the incoming JWT token
 func (j *JWTValidator) ValidateJWT(tokenString string) (jwt.MapClaims, error) {
+	// Decode the token header without validating the signature
+	token, _, err := new(jwt.Parser).ParseUnverified(tokenString, jwt.MapClaims{})
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse token header: %v", err)
+	}
+
+	// Extract algorithm from token header
+	alg := token.Header["alg"]
+	switch alg {
+	case "HS256":
+		// Validate with HMAC secret
+		return j.validateWithHMAC(tokenString)
+	case "RS256":
+		// Validate with RSA public key from JWKS
+		return j.validateWithRSA(tokenString)
+	default:
+		return nil, fmt.Errorf("unsupported signing method: %v", alg)
+	}
+}
+
+// If the token is signed with validateWithHMAC method then validate the token with HMAC Secret
+func (j *JWTValidator) validateWithHMAC(tokenString string) (jwt.MapClaims, error) {
 	token, err := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
-		// Ensure the signing method is HMAC (for shared secret)
 		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
 			return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
 		}
 		return []byte(j.Secret), nil
 	})
-	// Check if an error occurred during parsing
 	if err != nil {
-		switch {
-		case errors.Is(err, jwt.ErrTokenMalformed):
-			fmt.Println("That's not even a token")
-		case errors.Is(err, jwt.ErrTokenSignatureInvalid):
-			fmt.Println("Invalid signature")
-		case errors.Is(err, jwt.ErrTokenExpired) || errors.Is(err, jwt.ErrTokenNotValidYet):
-			fmt.Println("Timing is everything")
-		default:
-			fmt.Println("Couldn't handle this token:", err)
-		}
 		return nil, err
 	}
 
@@ -92,15 +124,104 @@ func (j *JWTValidator) ValidateJWT(tokenString string) (jwt.MapClaims, error) {
 	}
 }
 
+// If the token is signed with validateWithRSA method then validate the token with RSA Public Key
+func (j *JWTValidator) validateWithRSA(tokenString string) (jwt.MapClaims, error) {
+	token, err := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
+		if _, ok := token.Method.(*jwt.SigningMethodRSA); !ok {
+			return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
+		}
+		// Use JWKS URL to get the public key
+		keyFunc, err := j.getKeyFromJWKS(token)
+		if err != nil {
+			return nil, err
+		}
+		return keyFunc, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	if claims, ok := token.Claims.(jwt.MapClaims); ok && token.Valid {
+		return claims, nil
+	} else {
+		return nil, fmt.Errorf("invalid token")
+	}
+}
+
+// Retrieves the RSA public key from the JWKS using the "kid" in the token header,
+// optionally fetching the JWKS from the URL if it's not already cached
+func (j *JWTValidator) getKeyFromJWKS(token *jwt.Token) (interface{}, error) {
+	j.RLock()
+	if j.jwks != nil {
+		for _, key := range j.jwks.Keys {
+			if key.Kid == token.Header["kid"] {
+				return parseRSAPublicKey(&key)
+			}
+		}
+	}
+	j.RUnlock()
+
+	// Fetch the JWKS from the URL
+	j.RLock() // Prevent concurrent fetches
+	defer j.RUnlock()
+	resp, err := http.Get(j.jwksURL)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch JWKS: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("failed to fetch JWKS: received status code %v", resp.StatusCode)
+	}
+
+	var jwks JWKS
+	if err := json.NewDecoder(resp.Body).Decode(&jwks); err != nil {
+		return nil, fmt.Errorf("failed to decode JWKS: %v", err)
+	}
+
+	j.Lock()
+	j.jwks = &jwks
+	j.Unlock()
+
+	// Find the key that matches the "kid" in the token header
+	for _, key := range jwks.Keys {
+		if key.Kid == token.Header["kid"] {
+			return parseRSAPublicKey(&key)
+		}
+	}
+
+	return nil, fmt.Errorf("no matching key found in JWKS for kid: %v", token.Header["kid"])
+}
+
+// parseRSAPublicKey parses a JSONWebKey into an RSA public key
+func parseRSAPublicKey(jwk *JSONWebKey) (interface{}, error) {
+	if len(jwk.X5c) == 0 {
+		return nil, fmt.Errorf("no certificate found in JWKS for key ID: %s", jwk.Kid)
+	}
+
+	// Decode the PEM encoded certificate
+	certPEM := "-----BEGIN CERTIFICATE-----\n" + jwk.X5c[0] + "\n-----END CERTIFICATE-----"
+	cert, err := jwt.ParseRSAPublicKeyFromPEM([]byte(certPEM))
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse RSA public key from JWKS: %v", err)
+	}
+
+	return cert, nil
+}
+
 // Middleware function that validates the JWT token and enriches the request with claims
 func (j *JWTValidator) Middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Logging
-		logger.Info(fmt.Sprintf("[PLUGIN: %s] Middleware executing..", HandlerRegisterer))
+		logger.Info(fmt.Sprintf("[PLUGIN: %s] Middleware executing..matching.", HandlerRegisterer))
+
+		// print the request context
+		logger.Debug(fmt.Sprintf("[PLUGIN: %s] Request contest: %v ", HandlerRegisterer, r.Context()))
 
 		// Check if the bypassValidation field is available in the context
 		if bypass, ok := r.Context().Value("bypassValidation").(bool); ok && bypass {
-			logger.Info("[PLUGIN: JWT Validator] Bypassing validation based on context flag")
+
+			logger.Info(fmt.Sprintf("[PLUGIN: %s] Bypassing validation based on context flag.", HandlerRegisterer))
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -171,13 +292,3 @@ func (n noopLogger) Warning(_ ...interface{})  {}
 func (n noopLogger) Error(_ ...interface{})    {}
 func (n noopLogger) Critical(_ ...interface{}) {}
 func (n noopLogger) Fatal(_ ...interface{})    {}
-
-func isExceptionPath(path string) bool {
-	for _, pattern := range exceptionPatterns {
-		matched, _ := regexp.MatchString(pattern, path)
-		if matched {
-			return true
-		}
-	}
-	return false
-}
