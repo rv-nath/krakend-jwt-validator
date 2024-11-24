@@ -173,6 +173,7 @@ func (j *JWTValidator) validateWithRSA(tokenString string) (jwt.MapClaims, error
 	}
 
 	if claims, ok := token.Claims.(jwt.MapClaims); ok && token.Valid {
+		logger.Debug(fmt.Sprintf("[PLUGIN: %s] Token is valid.  Good to go...", HandlerRegisterer))
 		return claims, nil
 	} else {
 		return nil, fmt.Errorf("invalid token")
@@ -221,7 +222,7 @@ func (j *JWTValidator) getKeyFromJWKS(token *jwt.Token) (interface{}, error) {
 	logger.Debug(fmt.Sprintf("[PLUGIN: %s] Found kid value in token: %v ", HandlerRegisterer, token.Header["kid"]))
 	for _, key := range jwks.Keys {
 		if key.Kid == token.Header["kid"] {
-			logger.Error(fmt.Sprintf("[PLUGIN: %s] No matching kid in jwks for %v ", HandlerRegisterer, token.Header["kid"]))
+			logger.Debug(fmt.Sprintf("[PLUGIN: %s] Match found for kid in jwks for %v ", HandlerRegisterer, token.Header["kid"]))
 			return parseRSAPublicKey(&key)
 		}
 	}
