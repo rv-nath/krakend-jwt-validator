@@ -60,17 +60,6 @@ func (r registerer) registerHandlers(_ context.Context, extra map[string]interfa
 	// Inititalize the JWTValidator struct
 	jwtValidator := &JWTValidator{Secret: secret, jwksURL: jwksURL}
 
-	/*
-		// if jwksURL is provided, fetch the JWKS from the jwksURL
-		if jwksURL != "" {
-			err := jwtValidator.fetchJWKS()
-			if err != nil {
-				logger.Error(fmt.Sprintf("[PLUGIN: %s] Failed to fetch JWKS: %v", HandlerRegisterer, err))
-				return nil, err
-			}
-		}
-	*/
-
 	logger.Debug(fmt.Sprintf("[PLUGIN: %s] JWT validator middleware registered.", HandlerRegisterer))
 	return jwtValidator.Middleware(h), nil
 }
@@ -204,13 +193,13 @@ func (j *JWTValidator) getKeyFromJWKS(token *jwt.Token) (interface{}, error) {
 	j.RUnlock()
 
 	// Fetch the JWKS from the URL
-	fmt.Printf("Fetching JWKS from URL: %s\n", j.jwksURL)
+	logger.Debug(fmt.Sprintf("[PLUGIN: %s] Fetching JWKS from URL: %v ", HandlerRegisterer, j.jwksURL))
 	resp, err := http.Get(j.jwksURL)
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch JWKS: %v", err)
 	}
 	defer resp.Body.Close()
-	fmt.Printf("Finished fetching JWKS from URL: %s\n", j.jwksURL)
+	logger.Debug(fmt.Sprintf("[PLUGIN: %s] Finished fetching JWKS from URL %v ", HandlerRegisterer, j.jwksURL))
 
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("failed to fetch JWKS: received status code %v", resp.StatusCode)
@@ -224,40 +213,21 @@ func (j *JWTValidator) getKeyFromJWKS(token *jwt.Token) (interface{}, error) {
 	j.Lock()
 	j.jwks = &jwks
 	j.Unlock()
-	// fmt.Printf("JWKS data fetched from URL: %v\n", j.jwks)
-	printJWKS(j.jwks)
+	// printJWKS(j.jwks)
 
 	j.RLock()
 	defer j.RUnlock()
 	// Find the key that matches the "kid" in the token header
-	fmt.Printf("Token kid: %v\n", token.Header["kid"])
+	logger.Debug(fmt.Sprintf("[PLUGIN: %s] Found kid value in token: %v ", HandlerRegisterer, token.Header["kid"]))
 	for _, key := range jwks.Keys {
-		fmt.Printf("Key: %v\n", key.Kid)
 		if key.Kid == token.Header["kid"] {
+			logger.Error(fmt.Sprintf("[PLUGIN: %s] No matching kid in jwks for %v ", HandlerRegisterer, token.Header["kid"]))
 			return parseRSAPublicKey(&key)
 		}
 	}
 
 	return nil, fmt.Errorf("no matching key found in JWKS for kid: %v", token.Header["kid"])
 }
-
-/*
-// parseRSAPublicKey parses a JSONWebKey into an RSA public key
-func parseRSAPublicKey(jwk *JSONWebKey) (interface{}, error) {
-	if len(jwk.X5c) == 0 {
-		return nil, fmt.Errorf("no certificate found in JWKS for key ID: %s", jwk.Kid)
-	}
-
-	// Decode the PEM encoded certificate
-	certPEM := "-----BEGIN CERTIFICATE-----\n" + jwk.X5c[0] + "\n-----END CERTIFICATE-----"
-	cert, err := jwt.ParseRSAPublicKeyFromPEM([]byte(certPEM))
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse RSA public key from JWKS: %v", err)
-	}
-
-	return cert, nil
-}
-*/
 
 // parseRSAPublicKey parses a JSONWebKey into an RSA public key
 func parseRSAPublicKey(jwk *JSONWebKey) (interface{}, error) {
@@ -373,6 +343,7 @@ func (n noopLogger) Error(_ ...interface{})    {}
 func (n noopLogger) Critical(_ ...interface{}) {}
 func (n noopLogger) Fatal(_ ...interface{})    {}
 
+/*
 func printJWKS(jwks *JWKS) {
 	for _, key := range jwks.Keys {
 		fmt.Printf("Key ID: %v\n", key.Kid)
@@ -384,3 +355,4 @@ func printJWKS(jwks *JWKS) {
 		fmt.Printf("Certificate: %v\n", key.X5c)
 	}
 }
+*/
