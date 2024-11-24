@@ -99,7 +99,7 @@ func TestJWTValidatorMiddleware(t *testing.T) {
 			"iat":  1516239022,
 		}
 		token := jwt.NewWithClaims(jwt.SigningMethodRS256, claims)
-		token.Header["Kid"] = "test-key"
+		token.Header["kid"] = "test-key"
 		tokenString, err := token.SignedString(privateKey)
 		if err != nil {
 			t.Fatalf("Failed to sign token with RSA private key: %v", err)

@@ -2,9 +2,12 @@ package main
 
 import (
 	"context"
+	"crypto/rsa"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math/big"
 	"net/http"
 	"strings"
 	"sync"
@@ -201,8 +204,6 @@ func (j *JWTValidator) getKeyFromJWKS(token *jwt.Token) (interface{}, error) {
 	j.RUnlock()
 
 	// Fetch the JWKS from the URL
-	// j.RLock() // Prevent concurrent fetches
-	// defer j.RUnlock()
 	fmt.Printf("Fetching JWKS from URL: %s\n", j.jwksURL)
 	resp, err := http.Get(j.jwksURL)
 	if err != nil {
@@ -223,6 +224,8 @@ func (j *JWTValidator) getKeyFromJWKS(token *jwt.Token) (interface{}, error) {
 	j.Lock()
 	j.jwks = &jwks
 	j.Unlock()
+	// fmt.Printf("JWKS data fetched from URL: %v\n", j.jwks)
+	printJWKS(j.jwks)
 
 	j.RLock()
 	defer j.RUnlock()
@@ -230,7 +233,7 @@ func (j *JWTValidator) getKeyFromJWKS(token *jwt.Token) (interface{}, error) {
 	fmt.Printf("Token kid: %v\n", token.Header["kid"])
 	for _, key := range jwks.Keys {
 		fmt.Printf("Key: %v\n", key.Kid)
-		if key.Kid == token.Header["Kid"] {
+		if key.Kid == token.Header["kid"] {
 			return parseRSAPublicKey(&key)
 		}
 	}
@@ -238,6 +241,7 @@ func (j *JWTValidator) getKeyFromJWKS(token *jwt.Token) (interface{}, error) {
 	return nil, fmt.Errorf("no matching key found in JWKS for kid: %v", token.Header["kid"])
 }
 
+/*
 // parseRSAPublicKey parses a JSONWebKey into an RSA public key
 func parseRSAPublicKey(jwk *JSONWebKey) (interface{}, error) {
 	if len(jwk.X5c) == 0 {
@@ -252,6 +256,37 @@ func parseRSAPublicKey(jwk *JSONWebKey) (interface{}, error) {
 	}
 
 	return cert, nil
+}
+*/
+
+// parseRSAPublicKey parses a JSONWebKey into an RSA public key
+func parseRSAPublicKey(jwk *JSONWebKey) (interface{}, error) {
+	if jwk.N == "" || jwk.E == "" {
+		return nil, fmt.Errorf("modulus or exponent is missing in JWKS for key ID: %s", jwk.Kid)
+	}
+	// Decode the modulus (N) and exponent (E) from base64
+	nBytes, err := base64.RawURLEncoding.DecodeString(jwk.N)
+	if err != nil {
+		return nil, fmt.Errorf("failed to decode modulus from JWKS: %v", err)
+	}
+
+	eBytes, err := base64.RawURLEncoding.DecodeString(jwk.E)
+	if err != nil {
+		return nil, fmt.Errorf("failed to decode exponent from JWKS: %v", err)
+	}
+	// Convert exponent bytes to integer
+	eInt := 0
+	for _, b := range eBytes {
+		eInt = (eInt << 8) | int(b)
+	}
+
+	// Create the RSA public key
+	pubKey := &rsa.PublicKey{
+		N: new(big.Int).SetBytes(nBytes),
+		E: eInt,
+	}
+
+	return pubKey, nil
 }
 
 // Middleware function that validates the JWT token and enriches the request with claims
@@ -337,3 +372,15 @@ func (n noopLogger) Warning(_ ...interface{})  {}
 func (n noopLogger) Error(_ ...interface{})    {}
 func (n noopLogger) Critical(_ ...interface{}) {}
 func (n noopLogger) Fatal(_ ...interface{})    {}
+
+func printJWKS(jwks *JWKS) {
+	for _, key := range jwks.Keys {
+		fmt.Printf("Key ID: %v\n", key.Kid)
+		fmt.Printf("Key Type: %v\n", key.Kty)
+		fmt.Printf("Algorithm: %v\n", key.Alg)
+		fmt.Printf("Use: %v\n", key.Use)
+		fmt.Printf("Modulus: %v\n", key.N)
+		fmt.Printf("Exponent: %v\n", key.E)
+		fmt.Printf("Certificate: %v\n", key.X5c)
+	}
+}
