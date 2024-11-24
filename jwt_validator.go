@@ -31,17 +31,18 @@ func (r registerer) registerHandlers(_ context.Context, extra map[string]interfa
 	// If the plugin requires some configuration, it should be under the name of the plugin.
 	cfg, ok := extra[pluginName].(map[string]interface{})
 	if !ok {
-		return h, errors.New("configuration not found for jwt validator")
+		return nil, errors.New("configuration not found for jwt validator")
 	}
 
 	// Get the secret from the configuration
-	secret, ok := cfg["sharedSecret"].(string)
+	secret, ok := cfg["shared_secret"].(string)
 	if !ok {
-		logger.Info(fmt.Sprintf("[PLUGIN: %s] Missing secret in configuration. Will not handle RSA signed JWTs.", HandlerRegisterer))
+		logger.Info(fmt.Sprintf("[PLUGIN: %s] Missing secret in configuration. Will not handle HMAC signed JWTs.", HandlerRegisterer))
 		// return h, errors.New("missing jwt secret in configuration")
 	}
 
-	jwksURL, ok := cfg["jwksURL"].(string)
+	// Get JWKS URL from the configuration
+	jwksURL, ok := cfg["jwks_url"].(string)
 	if !ok {
 		logger.Info(fmt.Sprintf("[PLUGIN: %s] Missing jwksURL in configuration. Will not handle RSA signed JWTs.", HandlerRegisterer))
 		// return h, errors.New("missing `` in configuration")
@@ -50,10 +51,22 @@ func (r registerer) registerHandlers(_ context.Context, extra map[string]interfa
 	// Check if at least one of the secret or jwksURL is provided
 	if secret == "" && jwksURL == "" {
 		logger.Error(fmt.Sprintf("[PLUGIN: %s] At least either `shared_secret` or `jwks_url` must be provided in krakend.json", HandlerRegisterer))
-		return h, errors.New("Either jwt secret or jwksURL is required")
+		return nil, errors.New("Either jwt secret or jwksURL is required")
 	}
 
-	jwtValidator := &JWTValidator{Secret: secret}
+	// Inititalize the JWTValidator struct
+	jwtValidator := &JWTValidator{Secret: secret, jwksURL: jwksURL}
+
+	/*
+		// if jwksURL is provided, fetch the JWKS from the jwksURL
+		if jwksURL != "" {
+			err := jwtValidator.fetchJWKS()
+			if err != nil {
+				logger.Error(fmt.Sprintf("[PLUGIN: %s] Failed to fetch JWKS: %v", HandlerRegisterer, err))
+				return nil, err
+			}
+		}
+	*/
 
 	logger.Debug(fmt.Sprintf("[PLUGIN: %s] JWT validator middleware registered.", HandlerRegisterer))
 	return jwtValidator.Middleware(h), nil
@@ -81,6 +94,32 @@ type JSONWebKey struct {
 	N   string   `json:"n"`
 	E   string   `json:"e"`
 	X5c []string `json:"x5c"`
+}
+
+/*
+ * Fetches the JWKS data from the JWKS URL and stores it in the JWTValidator struct
+ */
+func (j *JWTValidator) fetchJWKS() error {
+	resp, err := http.Get(j.jwksURL)
+	if err != nil {
+		return fmt.Errorf("failed to fetch JWKS: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("failed to fetch JWKS: received status code %v", resp.StatusCode)
+	}
+
+	var jwks JWKS
+	if err := json.NewDecoder(resp.Body).Decode(&jwks); err != nil {
+		return fmt.Errorf("failed to decode JWKS: %v", err)
+	}
+
+	j.Lock()
+	j.jwks = &jwks
+	j.Unlock()
+
+	return nil
 }
 
 // ValidateJWT validates the incoming JWT token
@@ -162,13 +201,15 @@ func (j *JWTValidator) getKeyFromJWKS(token *jwt.Token) (interface{}, error) {
 	j.RUnlock()
 
 	// Fetch the JWKS from the URL
-	j.RLock() // Prevent concurrent fetches
-	defer j.RUnlock()
+	// j.RLock() // Prevent concurrent fetches
+	// defer j.RUnlock()
+	fmt.Printf("Fetching JWKS from URL: %s\n", j.jwksURL)
 	resp, err := http.Get(j.jwksURL)
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch JWKS: %v", err)
 	}
 	defer resp.Body.Close()
+	fmt.Printf("Finished fetching JWKS from URL: %s\n", j.jwksURL)
 
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("failed to fetch JWKS: received status code %v", resp.StatusCode)
@@ -183,9 +224,13 @@ func (j *JWTValidator) getKeyFromJWKS(token *jwt.Token) (interface{}, error) {
 	j.jwks = &jwks
 	j.Unlock()
 
+	j.RLock()
+	defer j.RUnlock()
 	// Find the key that matches the "kid" in the token header
+	fmt.Printf("Token kid: %v\n", token.Header["kid"])
 	for _, key := range jwks.Keys {
-		if key.Kid == token.Header["kid"] {
+		fmt.Printf("Key: %v\n", key.Kid)
+		if key.Kid == token.Header["Kid"] {
 			return parseRSAPublicKey(&key)
 		}
 	}
